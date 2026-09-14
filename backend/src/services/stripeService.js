@@ -22,20 +22,24 @@ export const isStripeConfigured = () => {
   return Boolean(key && !key.includes('your_stripe') && key !== 'sk_test_dummy');
 };
 
+/** Stripe account currency — USD matches this demo's $ prices */
+export const getStripeCurrency = () =>
+  (process.env.STRIPE_CURRENCY || 'usd').toLowerCase();
+
 export const createPaymentIntent = async ({
   amount,
-  currency = 'inr',
+  currency = getStripeCurrency(),
   metadata = {},
   receiptEmail,
   customerId,
 }) => {
   try {
     const stripe = getStripe();
-    // INR uses paise (x100), same as cents
+    // Most currencies use a 1/100 subunit (cents / paise)
     const amountInSmallest = Math.round(Number(amount) * 100);
 
     if (amountInSmallest < 50) {
-      throw new ApiError(400, 'Amount must be at least ₹0.50');
+      throw new ApiError(400, 'Amount must be at least 0.50 in your currency');
     }
 
     const paymentIntent = await stripe.paymentIntents.create({
@@ -58,6 +62,65 @@ export const createPaymentIntent = async ({
       err?.message || 'Card payment failed. Try Cash on Delivery.'
     );
   }
+};
+
+/** Hosted Stripe Checkout page (checkout.stripe.com portal) */
+export const createCheckoutSession = async ({
+  amount,
+  currency = getStripeCurrency(),
+  metadata = {},
+  customerId,
+  customerEmail,
+  lineItemName,
+  successUrl,
+  cancelUrl,
+}) => {
+  try {
+    const stripe = getStripe();
+    const amountInSmallest = Math.round(Number(amount) * 100);
+
+    if (amountInSmallest < 50) {
+      throw new ApiError(400, 'Amount must be at least 0.50 in your currency');
+    }
+
+    return await stripe.checkout.sessions.create({
+      mode: 'payment',
+      ...(customerId ? { customer: customerId } : {}),
+      ...(customerEmail && !customerId ? { customer_email: customerEmail } : {}),
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency,
+            unit_amount: amountInSmallest,
+            product_data: {
+              name: lineItemName || 'FoodDash order',
+            },
+          },
+        },
+      ],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata,
+      payment_intent_data: {
+        metadata,
+      },
+    });
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    const status = err?.statusCode === 401 || err?.statusCode === 403 ? 503 : 502;
+    throw new ApiError(
+      status,
+      err?.message || 'Could not start Stripe Checkout. Try Cash on Delivery.'
+    );
+  }
+};
+
+export const retrieveCheckoutSession = async (sessionId) => {
+  const stripe = getStripe();
+  return stripe.checkout.sessions.retrieve(sessionId, {
+    expand: ['payment_intent'],
+  });
 };
 
 export const retrievePaymentIntent = async (paymentIntentId) => {

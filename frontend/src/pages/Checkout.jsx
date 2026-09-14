@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { loadStripe } from '@stripe/stripe-js';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
-import Spinner from '../components/ui/Spinner';
 import EmptyState from '../components/ui/EmptyState';
 import PageCloseButton from '../components/ui/PageCloseButton';
 import { useAuth } from '../context/AuthContext';
@@ -17,57 +14,11 @@ import { authService } from '../services/authService';
 import { DEFAULT_DELIVERY_FEE, TAX_RATE } from '../utils/constants';
 import { formatPrice, getErrorMessage } from '../utils/formatPrice';
 
-const stripeKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim();
-const stripePromise = stripeKey ? loadStripe(stripeKey) : null;
-
-function PaymentForm({ orderId, onSuccess }) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [loading, setLoading] = useState(false);
-
-  const handlePay = async (e) => {
-    e.preventDefault();
-    if (!stripe || !elements) return;
-    setLoading(true);
-    try {
-      const { error, paymentIntent } = await stripe.confirmPayment({
-        elements,
-        redirect: 'if_required',
-      });
-      if (error) {
-        toast.error(error.message || 'Payment failed');
-        return;
-      }
-      if (paymentIntent?.status === 'succeeded') {
-        await paymentService.confirm({
-          orderId,
-          paymentIntentId: paymentIntent.id,
-        });
-        onSuccess?.(paymentIntent.id);
-      } else {
-        toast.error('Payment was not completed');
-      }
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Payment failed'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handlePay} className="space-y-4">
-      <PaymentElement />
-      <Button type="submit" loading={loading} className="w-full" disabled={!stripe}>
-        Pay now
-      </Button>
-    </form>
-  );
-}
-
 export default function Checkout() {
   const { user, refreshUser } = useAuth();
   const { cart, fetchCart } = useCart();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [deliveryType, setDeliveryType] = useState('now');
   const [scheduledDate, setScheduledDate] = useState('');
   const [scheduledTime, setScheduledTime] = useState('');
@@ -86,12 +37,16 @@ export default function Checkout() {
     zip: '',
     isDefault: true,
   });
-  const [step, setStep] = useState('details');
   const [order, setOrder] = useState(null);
-  const [clientSecret, setClientSecret] = useState('');
   const [placing, setPlacing] = useState(false);
-  const [payMethod, setPayMethod] = useState('cod');
+  const [payMethod, setPayMethod] = useState('card');
   const [stripeEnabled, setStripeEnabled] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get('canceled') === '1') {
+      toast.error('Stripe payment was canceled. You can try again or use Cash on Delivery.');
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     paymentService
@@ -99,7 +54,7 @@ export default function Checkout() {
       .then((cfg) => {
         const enabled = Boolean(cfg?.stripeEnabled && cfg?.publishableKey);
         setStripeEnabled(enabled);
-        if (!enabled) setPayMethod('cod');
+        setPayMethod(enabled ? 'card' : 'cod');
       })
       .catch(() => {
         setStripeEnabled(false);
@@ -150,7 +105,7 @@ export default function Checkout() {
     }
   };
 
-  if (!cart.items?.length && step === 'details') {
+  if (!cart.items?.length) {
     return (
       <div className="container-app py-10">
         <EmptyState
@@ -216,16 +171,16 @@ export default function Checkout() {
         return;
       }
 
-      const intent = await paymentService.createIntent({
+      // Card: redirect to Stripe Hosted Checkout portal (checkout.stripe.com)
+      const session = await paymentService.createCheckoutSession({
         orderId: orderData._id,
       });
-      const secret = intent?.clientSecret || intent?.client_secret;
-      if (!secret) {
-        throw new Error('Card payment unavailable. Choose Cash on Delivery.');
+      const checkoutUrl = session?.url;
+      if (!checkoutUrl) {
+        throw new Error('Could not open Stripe payment page. Try Cash on Delivery.');
       }
-      setClientSecret(secret);
-      setStep('payment');
-      toast.success('Order created — complete card payment');
+      toast.success('Redirecting to Stripe secure payment…');
+      window.location.assign(checkoutUrl);
     } catch (error) {
       toast.error(getErrorMessage(error, 'Could not place order'));
     } finally {
@@ -242,8 +197,7 @@ export default function Checkout() {
 
       <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
         <div className="space-y-6">
-          {step === 'details' && (
-            <>
+          <>
               <section className="card space-y-4 p-5">
                 <h2 className="text-lg font-semibold text-slate-900">Delivery address</h2>
                 {addresses.length > 0 && (
@@ -436,7 +390,7 @@ export default function Checkout() {
                   >
                     Cash on Delivery
                     <span className="mt-1 block text-xs font-normal text-slate-500">
-                      Pay when your order arrives
+                      Pay when your order arrives · no Stripe page
                     </span>
                   </button>
                   <button
@@ -452,11 +406,17 @@ export default function Checkout() {
                     Pay by Card (Stripe)
                     <span className="mt-1 block text-xs font-normal text-slate-500">
                       {stripeEnabled
-                        ? 'Secure Stripe test/live card payment'
+                        ? 'Opens Stripe secure payment portal'
                         : 'Add Stripe test keys in backend + frontend .env to enable'}
                     </span>
                   </button>
                 </div>
+                {stripeEnabled && payMethod === 'card' && (
+                  <p className="rounded-xl bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                    After you continue, you will be redirected to Stripe&apos;s payment page
+                    to enter your card details. You will return here when payment finishes.
+                  </p>
+                )}
                 {!stripeEnabled && (
                   <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     Stripe is not configured yet. Use Cash on Delivery for now, or set
@@ -470,48 +430,11 @@ export default function Checkout() {
               </section>
 
               <Button loading={placing} onClick={placeOrder} className="w-full sm:w-auto">
-                {payMethod === 'cod' ? 'Place order' : 'Place order & pay'}
+                {payMethod === 'cod'
+                  ? 'Place order (Cash on Delivery)'
+                  : 'Continue to Stripe payment'}
               </Button>
-            </>
-          )}
-
-          {step === 'payment' && (
-            <section className="card p-5">
-              <h2 className="mb-4 text-lg font-semibold text-slate-900">Card payment</h2>
-              {!clientSecret ? (
-                <Spinner label="Preparing payment..." />
-              ) : (
-                <Elements
-                  stripe={stripePromise}
-                  options={{
-                    clientSecret,
-                    appearance: { theme: 'stripe', variables: { colorPrimary: '#ea580c' } },
-                  }}
-                >
-                  <PaymentForm
-                    orderId={order?._id}
-                    onSuccess={(pi) =>
-                      navigate(`/payment/success?orderId=${order?._id}&payment_intent=${pi}`)
-                    }
-                  />
-                </Elements>
-              )}
-              <Button
-                variant="secondary"
-                className="mt-4 w-full"
-                onClick={async () => {
-                  try {
-                    await paymentService.payCod({ orderId: order._id });
-                    navigate(`/payment/success?orderId=${order._id}&method=cod`);
-                  } catch (error) {
-                    toast.error(getErrorMessage(error));
-                  }
-                }}
-              >
-                Switch to Cash on Delivery
-              </Button>
-            </section>
-          )}
+          </>
         </div>
 
         <aside className="card h-fit space-y-3 p-5">
@@ -557,7 +480,7 @@ export default function Checkout() {
                 {formatPrice(order?.total ?? totals.total)}
               </span>
             </div>
-            {step === 'details' && totals.etaMinutes && (
+            {totals.etaMinutes && (
               <p className="rounded-lg bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700">
                 Estimated delivery ~{totals.etaMinutes} minutes after payment
               </p>

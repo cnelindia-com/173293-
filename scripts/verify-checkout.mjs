@@ -17,12 +17,14 @@ const hasStripeHint = /Stripe is not configured|Add Stripe test keys|Cash on Del
 const cardBtn = page.locator('button:has-text("Pay by Card")');
 const cardCount = await cardBtn.count();
 const cardDisabled = cardCount ? await cardBtn.first().isDisabled() : null;
+const stripeReady = /Secure Stripe|Pay by Card/i.test(text) && !/Stripe is not configured/i.test(text);
 
 console.log(
   JSON.stringify(
     {
       url: page.url(),
       hasStripeHint,
+      stripeReady,
       cardCount,
       cardDisabled,
       emptyCart: /cart is empty|empty cart|no items/i.test(text),

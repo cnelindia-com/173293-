@@ -6,17 +6,24 @@ import asyncHandler from '../utils/asyncHandler.js';
 import User from '../models/User.js';
 import {
   createPaymentIntent,
+  createCheckoutSession,
+  retrieveCheckoutSession,
   retrievePaymentIntent,
   constructWebhookEvent,
   getOrCreateCustomer,
   listCustomerPaymentMethods,
   detachPaymentMethod,
   isStripeConfigured,
+  getStripeCurrency,
 } from '../services/stripeService.js';
 import { createNotification } from '../services/notificationService.js';
 import { emitOrderStatus, getIO } from '../sockets/orderSocket.js';
 
 export const createIntentValidators = [
+  body('orderId').isMongoId().withMessage('Valid order id is required'),
+];
+
+export const createCheckoutValidators = [
   body('orderId').isMongoId().withMessage('Valid order id is required'),
 ];
 
@@ -89,7 +96,7 @@ export const getConfig = asyncHandler(async (req, res) => {
         : '',
       stripeEnabled: configured,
       methods: configured ? ['cod', 'card'] : ['cod'],
-      currency: 'inr',
+      currency: getStripeCurrency(),
     },
   });
 });
@@ -112,7 +119,7 @@ export const payWithCod = asyncHandler(async (req, res) => {
   if (payment) {
     payment.stripePaymentIntentId = codId;
     payment.amount = order.total;
-    payment.currency = 'inr';
+    payment.currency = getStripeCurrency();
     payment.status = 'pending';
     await payment.save();
   } else {
@@ -122,7 +129,7 @@ export const payWithCod = asyncHandler(async (req, res) => {
       stripePaymentIntentId: codId,
       method: 'cod',
       amount: order.total,
-      currency: 'inr',
+      currency: getStripeCurrency(),
       status: 'pending',
     });
   }
@@ -193,7 +200,7 @@ export const createIntent = asyncHandler(async (req, res) => {
 
   const paymentIntent = await createPaymentIntent({
     amount: order.total,
-    currency: 'inr',
+    currency: getStripeCurrency(),
     metadata: {
       orderId: order._id.toString(),
       userId: req.user._id.toString(),
@@ -207,7 +214,7 @@ export const createIntent = asyncHandler(async (req, res) => {
     payment.stripePaymentIntentId = paymentIntent.id;
     payment.amount = order.total;
     payment.method = 'card';
-    payment.currency = 'inr';
+    payment.currency = getStripeCurrency();
     await payment.save();
   } else {
     payment = await Payment.create({
@@ -216,7 +223,7 @@ export const createIntent = asyncHandler(async (req, res) => {
       stripePaymentIntentId: paymentIntent.id,
       method: 'card',
       amount: order.total,
-      currency: 'inr',
+      currency: getStripeCurrency(),
       status: 'pending',
     });
   }
@@ -233,6 +240,197 @@ export const createIntent = asyncHandler(async (req, res) => {
       paymentId: payment._id,
       amount: order.total,
     },
+  });
+});
+
+/** Create Stripe Hosted Checkout Session and return portal URL */
+export const createCheckout = asyncHandler(async (req, res) => {
+  const order = await Order.findById(req.body.orderId)
+    .populate('user', 'email name')
+    .populate('restaurant', 'name');
+  if (!order) throw new ApiError(404, 'Order not found');
+
+  if (order.user._id.toString() !== req.user._id.toString()) {
+    throw new ApiError(403, 'Not authorized for this order');
+  }
+
+  if (order.paymentStatus === 'paid') {
+    throw new ApiError(400, 'Order is already paid');
+  }
+
+  if (order.status === 'cancelled') {
+    throw new ApiError(400, 'Cannot pay for a cancelled order');
+  }
+
+  if (!isStripeConfigured()) {
+    throw new ApiError(
+      503,
+      'Card payments are unavailable. Please choose Cash on Delivery.'
+    );
+  }
+
+  const user = await User.findById(req.user._id);
+  let customerId;
+  try {
+    customerId = await getOrCreateCustomer({ user });
+  } catch {
+    customerId = undefined;
+  }
+
+  const clientUrl = (process.env.CLIENT_URL || 'http://localhost:5173').replace(
+    /\/$/,
+    ''
+  );
+  const metadata = {
+    orderId: order._id.toString(),
+    userId: req.user._id.toString(),
+  };
+
+  const session = await createCheckoutSession({
+    amount: order.total,
+    currency: getStripeCurrency(),
+    metadata,
+    customerId,
+    customerEmail: order.user.email,
+    lineItemName: `FoodDash · ${order.restaurant?.name || 'Order'}`,
+    successUrl: `${clientUrl}/payment/success?orderId=${order._id}&session_id={CHECKOUT_SESSION_ID}`,
+    cancelUrl: `${clientUrl}/checkout?canceled=1&orderId=${order._id}`,
+  });
+
+  let payment = await Payment.findOne({ order: order._id, status: 'pending' });
+  if (payment) {
+    payment.stripePaymentIntentId = session.id;
+    payment.amount = order.total;
+    payment.method = 'card';
+    payment.currency = getStripeCurrency();
+    await payment.save();
+  } else {
+    payment = await Payment.create({
+      user: req.user._id,
+      order: order._id,
+      stripePaymentIntentId: session.id,
+      method: 'card',
+      amount: order.total,
+      currency: getStripeCurrency(),
+      status: 'pending',
+    });
+  }
+
+  order.payment = payment._id;
+  await order.save();
+
+  res.status(201).json({
+    success: true,
+    message: 'Stripe Checkout session created',
+    data: {
+      url: session.url,
+      sessionId: session.id,
+      paymentId: payment._id,
+      amount: order.total,
+    },
+  });
+});
+
+export const confirmCheckout = asyncHandler(async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) throw new ApiError(400, 'sessionId is required');
+
+  const session = await retrieveCheckoutSession(sessionId);
+
+  if (session.metadata?.userId !== req.user._id.toString()) {
+    throw new ApiError(403, 'Not authorized for this payment');
+  }
+
+  if (session.payment_status !== 'paid' && session.status !== 'complete') {
+    throw new ApiError(400, `Checkout not completed: ${session.payment_status}`);
+  }
+
+  const paymentIntent =
+    typeof session.payment_intent === 'object' && session.payment_intent
+      ? session.payment_intent
+      : session.payment_intent
+        ? await retrievePaymentIntent(session.payment_intent)
+        : null;
+
+  if (!paymentIntent) {
+    // Fallback: mark using session metadata + id
+    const orderId = session.metadata?.orderId;
+    const order = await Order.findById(orderId);
+    if (!order) throw new ApiError(404, 'Order not found');
+
+    let payment = await Payment.findOne({
+      $or: [
+        { stripePaymentIntentId: session.id },
+        { order: order._id, method: 'card' },
+      ],
+    });
+
+    if (!payment) {
+      payment = await Payment.create({
+        user: order.user,
+        order: order._id,
+        stripePaymentIntentId: session.id,
+        method: 'card',
+        amount: (session.amount_total || 0) / 100,
+        currency: session.currency || getStripeCurrency(),
+        status: 'paid',
+      });
+    } else {
+      payment.status = 'paid';
+      payment.stripePaymentIntentId = session.id;
+      await payment.save();
+    }
+
+    order.paymentStatus = 'paid';
+    order.payment = payment._id;
+    if (order.status === 'pending') {
+      order.status = 'confirmed';
+      order.statusHistory.push({
+        status: 'confirmed',
+        at: new Date(),
+        note: 'Payment confirmed via Stripe Checkout',
+      });
+    }
+    await order.save();
+
+    const io = getIO();
+    emitOrderStatus(io, order);
+    await createNotification({
+      userId: order.user,
+      title: 'Payment successful',
+      message: `Payment for order ${order._id} was successful`,
+      type: 'payment',
+      relatedOrder: order._id,
+      io,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Payment confirmed',
+      data: { order, payment },
+    });
+  }
+
+  // Ensure metadata has orderId for markOrderPaid
+  if (!paymentIntent.metadata?.orderId && session.metadata?.orderId) {
+    paymentIntent.metadata = {
+      ...(paymentIntent.metadata || {}),
+      orderId: session.metadata.orderId,
+      userId: session.metadata.userId,
+    };
+  }
+
+  // Keep Payment row findable (was stored with session id)
+  await Payment.findOneAndUpdate(
+    { stripePaymentIntentId: session.id },
+    { stripePaymentIntentId: paymentIntent.id }
+  );
+
+  const result = await markOrderPaid(paymentIntent);
+  res.json({
+    success: true,
+    message: 'Payment confirmed',
+    data: result,
   });
 });
 

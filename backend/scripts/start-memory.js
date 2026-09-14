@@ -9,9 +9,13 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
+
+// Load backend/.env first so real Stripe keys are used (don't override with dummies)
+dotenv.config({ path: path.join(root, '.env') });
 
 const mongod = await MongoMemoryServer.create({
   instance: {
@@ -28,8 +32,20 @@ process.env.JWT_EXPIRE = process.env.JWT_EXPIRE || '7d';
 process.env.PORT = process.env.PORT || '5000';
 process.env.CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 process.env.NODE_ENV = process.env.NODE_ENV || 'development';
-process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy';
-process.env.STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || 'pk_test_dummy';
+
+const isPlaceholder = (value = '') =>
+  !value ||
+  value.includes('your_stripe') ||
+  value === 'sk_test_dummy' ||
+  value === 'pk_test_dummy';
+
+if (isPlaceholder(process.env.STRIPE_SECRET_KEY)) {
+  process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
+}
+if (isPlaceholder(process.env.STRIPE_PUBLISHABLE_KEY)) {
+  process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_dummy';
+}
+
 process.env.TAX_RATE = process.env.TAX_RATE || '0.08';
 process.env.DEFAULT_DELIVERY_FEE = process.env.DEFAULT_DELIVERY_FEE || '2.99';
 

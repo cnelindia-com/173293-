@@ -13,7 +13,12 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
 
-const mongod = await MongoMemoryServer.create();
+const mongod = await MongoMemoryServer.create({
+  instance: {
+    // Windows cold starts / first binary download often exceed the 10s default
+    launchTimeout: 120000,
+  },
+});
 const uri = mongod.getUri('food_delivery');
 
 process.env.MONGODB_URI = uri;

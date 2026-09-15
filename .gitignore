@@ -21,3 +21,8 @@ coverage/
 
 # Optional local notes
 *.local
+
+# Never commit personal access tokens
+gitpat.txt
+git pat.txt
+*pat.txt

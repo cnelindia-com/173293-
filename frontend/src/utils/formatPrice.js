@@ -42,12 +42,12 @@ export const formatRelativeTime = (value) => {
 };
 
 export const getSocketUrl = () => {
-  const api = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  const api = import.meta.env.VITE_API_URL || 'https://backend-lhva.onrender.com/api';
   try {
     const url = new URL(api);
     return url.origin;
   } catch {
-    return 'http://localhost:5000';
+    return 'https://backend-lhva.onrender.com';
   }
 };
 

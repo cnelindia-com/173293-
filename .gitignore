@@ -1,28 +1,25 @@
 # Dependencies
 node_modules/
 
-# Environment secrets — never commit these
-.env
-.env.*
-!.env.example
-
-# Logs / OS / editors
-logs/
-*.log
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
 # Build output
 dist/
-build/
-coverage/
 
-# Optional local notes
-*.local
+# Environment variables
+.env
+.env.local
+.env.*.local
 
-# Never commit personal access tokens
-gitpat.txt
-git pat.txt
-*pat.txt
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
